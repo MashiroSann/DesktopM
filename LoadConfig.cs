@@ -100,13 +100,31 @@ public static class LoadConfig
 
         try
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = fullPath,
-                UseShellExecute = true
-            };
+            ProcessStartInfo psi;
             if (asAdmin)
-                psi.Verb = "runas";
+            {
+                // Launch via cmd /c start with elevation to fully detach
+                psi = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c start \"\" \"{fullPath}\"",
+                    UseShellExecute = true,
+                    Verb = "runas",
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+            }
+            else
+            {
+                // Launch via cmd /c start to fully detach the child process
+                // so it does not share this console window
+                psi = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c start \"\" \"{fullPath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+            }
             Process.Start(psi);
             return (LaunchResult.Success, node.Name);
         }

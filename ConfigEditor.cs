@@ -327,6 +327,12 @@ public static class ConfigEditor
             }
             else if (rec.EventType == KEY_EVENT && rec.KeyEvent.bKeyDown != 0)
             {
+                // Ignore shift keys to prevent accidental console selection
+                if (rec.KeyEvent.wVirtualKeyCode == 0x10 ||
+                    rec.KeyEvent.wVirtualKeyCode == 0xA0 ||
+                    rec.KeyEvent.wVirtualKeyCode == 0xA1)
+                    continue;
+
                 if (rec.KeyEvent.wVirtualKeyCode == 0x1B) // ESC
                     return false;
             }
@@ -535,7 +541,7 @@ public static class ConfigEditor
 
     private static void AddFile(EditNode? parentFolder, ref string? status)
     {
-        string? name = PromptInput("输入显示名称: ");
+        string? name = PromptInput("输入显示名称 (ESC取消): ");
         if (string.IsNullOrWhiteSpace(name))
         {
             status = "已取消添加";
@@ -563,7 +569,7 @@ public static class ConfigEditor
 
     private static void AddFolder(EditNode? parentFolder, ref string? status)
     {
-        string? name = PromptInput("输入文件夹名称: ");
+        string? name = PromptInput("输入文件夹名称 (ESC取消): ");
         if (string.IsNullOrWhiteSpace(name))
         {
             status = "已取消添加";
@@ -606,7 +612,7 @@ public static class ConfigEditor
 
     private static void RenameNode(TreeLine line, ref string? status)
     {
-        string? newName = PromptInput("输入新名称: ");
+        string? newName = PromptInput("输入新名称 (ESC取消): ");
         if (string.IsNullOrWhiteSpace(newName))
         {
             status = "已取消重命名";
@@ -661,6 +667,9 @@ public static class ConfigEditor
 
             ushort vk = rec.KeyEvent.wVirtualKeyCode;
             char c = (char)rec.KeyEvent.UnicodeChar;
+
+            // Ignore shift keys to prevent accidental console selection
+            if (vk == 0x10 || vk == 0xA0 || vk == 0xA1) continue;
 
             if (vk == 0x0D) // Enter
             {

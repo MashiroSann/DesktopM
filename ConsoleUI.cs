@@ -391,6 +391,9 @@ public static class ConsoleUI
                 ushort vk = rec.KeyEvent.wVirtualKeyCode;
                 char c = (char)rec.KeyEvent.UnicodeChar;
 
+                // Ignore shift keys to prevent accidental console selection
+                if (vk == 0x10 || vk == 0xA0 || vk == 0xA1) continue;
+
                 if (vk == 0x0D) // Enter
                 {
                     string input = inputBuf.ToString().Trim();

@@ -1,1 +1,2 @@
-﻿ConsoleUI.Run();
+﻿if (Install.CheckAndRun())
+    ConsoleUI.Run();
