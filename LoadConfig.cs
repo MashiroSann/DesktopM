@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 
+public enum InputMode { Regex, Terminal }
+
 public static class LoadConfig
 {
     private class ConfigNode
@@ -25,6 +27,7 @@ public static class LoadConfig
 
     public static string Title1 { get; private set; } = "~ DesktopM ~";
     public static string Title2 { get; private set; } = "";
+    public static InputMode CurrentInputMode { get; private set; } = InputMode.Regex;
     public static ushort CurrentLayer { get; private set; } = 1;
 
     public static string GetConfigPath() =>
@@ -186,6 +189,13 @@ public static class LoadConfig
         if (title2Match.Success)
             Title2 = title2Match.Groups[1].Value;
 
+        var modeMatch = Regex.Match(content, @"#input_mode\s*=\s*""([^""]*)""");
+        if (modeMatch.Success && modeMatch.Groups[1].Value.Equals(
+                "terminal", StringComparison.OrdinalIgnoreCase))
+            CurrentInputMode = InputMode.Terminal;
+        else
+            CurrentInputMode = InputMode.Regex;
+
         int pos = 0;
         while (pos < content.Length && content[pos] != '{') pos++;
         if (pos < content.Length)
@@ -283,6 +293,8 @@ public static class LoadConfig
             sb.AppendLine($"#title1 = \"{Title1}\"");
         if (!string.IsNullOrEmpty(Title2))
             sb.AppendLine($"#title2 = \"{Title2}\"");
+        if (CurrentInputMode == InputMode.Terminal)
+            sb.AppendLine($"#input_mode = \"terminal\"");
         sb.AppendLine("{");
         foreach (var node in tree)
             SerializeNode(sb, node, 1);
@@ -315,6 +327,50 @@ public static class LoadConfig
         CurrentLayer = 1;
         Title1 = "~ DesktopM ~";
         Title2 = "";
+        CurrentInputMode = InputMode.Regex;
+    }
+
+    /// <summary>切换输入模式并持久化到配置文件</summary>
+    public static void ToggleInputMode()
+    {
+        CurrentInputMode = CurrentInputMode == InputMode.Regex
+            ? InputMode.Terminal
+            : InputMode.Regex;
+        SaveInputModeSetting();
+    }
+
+    /// <summary>仅更新配置文件中的 #input_mode 行，不重写整个文件</summary>
+    private static void SaveInputModeSetting()
+    {
+        string configPath = GetConfigPath();
+        string content = "";
+        if (File.Exists(configPath))
+            content = File.ReadAllText(configPath, Encoding.UTF8);
+
+        string modeValue = CurrentInputMode == InputMode.Terminal
+            ? "terminal" : "regex";
+        string newLine = $"#input_mode = \"{modeValue}\"";
+
+        var existing = Regex.Match(content,
+            @"^#input_mode\s*=\s*""[^""]*""[ \t]*(\r?\n|$)", RegexOptions.Multiline);
+
+        if (existing.Success)
+        {
+            content = content.Remove(existing.Index, existing.Length)
+                             .Insert(existing.Index, newLine + Environment.NewLine);
+        }
+        else
+        {
+            // 在第一个 '{' 之前插入（保持元数据在文件头部）
+            int braceIdx = content.IndexOf('{');
+            if (braceIdx >= 0)
+                content = content.Insert(braceIdx,
+                    newLine + Environment.NewLine);
+            else
+                content = newLine + Environment.NewLine + content;
+        }
+
+        File.WriteAllText(configPath, content, Encoding.UTF8);
     }
 
     private static string StripComments(string text)

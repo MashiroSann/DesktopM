@@ -81,13 +81,14 @@ public static class ConsoleUI
         public bool IsEditConfig;
     }
 
-    private enum InputAction { None, NavigateFolder, LaunchProgram, GoBack, EditConfig }
+    private enum InputAction { None, NavigateFolder, LaunchProgram, GoBack, EditConfig, RefreshDisplay }
 
     private static readonly List<HitArea> _hitAreas = new();
     private static int _highlightedIdx = -1;
     private static int _promptRow;
     private static IntPtr _inputHandle;
     private static uint _originalMode;
+    private static string? _pendingTerminalStatus;
 
     public static void Run()
     {
@@ -96,19 +97,42 @@ public static class ConsoleUI
         Console.CursorVisible = false;
         SetupConsole();
 
+        // ── 注册用户指令 ──
+        CommandSystem.Register("togglemode", _ =>
+        {
+            LoadConfig.ToggleInputMode();
+            CommandSystem.LastResult = CommandSystem.CommandResult.Refresh;
+        });
+        CommandSystem.Register("edit", _ =>
+        {
+            CommandSystem.LastResult = CommandSystem.CommandResult.EditConfig;
+        });
+
         try
         {
             string? statusMessage = null;
 
             while (true)
             {
-                RenderPage(statusMessage);
+                if (LoadConfig.CurrentInputMode == InputMode.Terminal)
+                {
+                    // 终端模式使用独立的状态信息通道
+                    RenderTerminalPage(_pendingTerminalStatus ?? statusMessage);
+                    _pendingTerminalStatus = null;
+                }
+                else
+                {
+                    RenderPage(statusMessage);
+                }
                 statusMessage = null;
 
                 var (action, index, admin) = WaitForInput();
 
                 switch (action)
                 {
+                    case InputAction.RefreshDisplay:
+                        continue; // 直接重新渲染
+
                     case InputAction.NavigateFolder:
                         LoadConfig.NavigateInto(index);
                         break;
@@ -340,6 +364,144 @@ public static class ConsoleUI
         Console.Write("> ");
     }
 
+    /// <summary>终端模式下的页面渲染：显示当前目录内容和命令行提示</summary>
+    private static void RenderTerminalPage(string? statusMessage)
+    {
+        Console.Clear();
+        Console.ResetColor();
+        _hitAreas.Clear();
+        _highlightedIdx = -1;
+
+        int width;
+        try { width = Console.WindowWidth; } catch { width = 80; }
+
+        int row = 0;
+
+        // ── 标题：当前路径 ──
+        string pathLabel = $"📁 {TerminalMode.CurrentDirectory}";
+        Console.SetCursorPosition(0, row++);
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.Write(pathLabel);
+        Console.ResetColor();
+
+        // ── 模式指示 ──
+        Console.SetCursorPosition(width - 20, 0);
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write("[终端模式]");
+        Console.ResetColor();
+
+        // ── 分隔线 ──
+        Console.SetCursorPosition(0, row++);
+        Console.Write(new string('═', Math.Min(width - 1, pathLabel.Length + 4)));
+
+        row++; // blank line
+
+        // ── 目录内容 ──
+        var contents = TerminalMode.GetDirectoryContents();
+        if (contents.Count == 0)
+        {
+            Console.SetCursorPosition(2, row++);
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.Write("(空目录)");
+            Console.ResetColor();
+        }
+        else
+        {
+            int maxNameLen = Math.Min(40, contents.Max(c => GetDisplayWidth(c.Name)) + 2);
+            int cols = Math.Max(1, (width - 2) / (maxNameLen + 2));
+            int currentCol = 0;
+
+            Console.SetCursorPosition(2, row);
+            for (int i = 0; i < contents.Count; i++)
+            {
+                var entry = contents[i];
+                string label = entry.IsDirectory
+                    ? $"📁 {entry.Name}"
+                    : $"   {entry.Name}";
+
+                // 截断过长名称
+                int maxDisplay = maxNameLen;
+                if (GetDisplayWidth(label) > maxDisplay)
+                {
+                    while (GetDisplayWidth(label + "…") > maxDisplay && label.Length > 1)
+                        label = label[..^1];
+                    label += "…";
+                }
+
+                Console.ForegroundColor = entry.IsDirectory
+                    ? ConsoleColor.Cyan
+                    : ConsoleColor.White;
+                Console.Write(label);
+                Console.ResetColor();
+
+                currentCol++;
+                if (currentCol >= cols && i < contents.Count - 1)
+                {
+                    row++;
+                    currentCol = 0;
+                    Console.SetCursorPosition(2, row);
+                }
+                else if (i < contents.Count - 1)
+                {
+                    int pad = maxNameLen + 2 - GetDisplayWidth(label);
+                    Console.Write(new string(' ', Math.Max(1, pad)));
+                }
+            }
+            row++;
+        }
+
+        row++; // blank line
+
+        // ── 分隔线 ──
+        Console.SetCursorPosition(0, row++);
+        Console.Write(new string('─', Math.Min(24, width - 1)));
+
+        // ── 帮助提示 ──
+        Console.SetCursorPosition(0, row++);
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.Write("cd <目录> | cd .. | ls | ./程序名 [-admin] | cc | /togglemode | /edit");
+        Console.ResetColor();
+
+        // ── [E] Edit Config ──
+        {
+            const string editLabel = "[E] Edit Config";
+            Console.SetCursorPosition(0, row);
+            _hitAreas.Add(new HitArea
+            {
+                Row = row, ColStart = 0, ColEnd = editLabel.Length,
+                Label = editLabel, ItemIndex = -1,
+                IsFolder = false, IsBack = false, IsEditConfig = true
+            });
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.Write(editLabel);
+            Console.ResetColor();
+            row++;
+        }
+
+        // ── 状态信息 ──
+        if (statusMessage != null)
+        {
+            row++;
+            Console.SetCursorPosition(0, row++);
+            bool isError = statusMessage.Contains("not found", StringComparison.OrdinalIgnoreCase)
+                        || statusMessage.StartsWith("Failed", StringComparison.OrdinalIgnoreCase)
+                        || statusMessage.StartsWith("未识别", StringComparison.OrdinalIgnoreCase)
+                        || statusMessage.StartsWith("目录不存在", StringComparison.OrdinalIgnoreCase);
+            Console.ForegroundColor = isError ? ConsoleColor.Red : ConsoleColor.Green;
+            Console.Write(statusMessage);
+            Console.ResetColor();
+        }
+
+        // ── 输入提示 ──
+        row++;
+        _promptRow = row;
+        Console.SetCursorPosition(0, _promptRow);
+        string shortPath = TerminalMode.CurrentDirectory;
+        if (shortPath.Length > 50)
+            shortPath = "…" + shortPath[^49..];
+        Console.Write($"{shortPath}> ");
+    }
+
     private static (InputAction action, int index, bool admin) WaitForInput()
     {
         var inputBuf = new StringBuilder();
@@ -399,6 +561,39 @@ public static class ConsoleUI
                     string input = inputBuf.ToString().Trim();
                     if (string.IsNullOrEmpty(input)) continue;
 
+                    // ── 1. 检查是否为 "/" 开头的用户指令 ──
+                    CommandSystem.LastResult = CommandSystem.CommandResult.None;
+                    if (CommandSystem.TryExecute(input))
+                    {
+                        var cmdResult = CommandSystem.LastResult;
+                        CommandSystem.LastResult = CommandSystem.CommandResult.None;
+                        switch (cmdResult)
+                        {
+                            case CommandSystem.CommandResult.EditConfig:
+                                return (InputAction.EditConfig, 0, false);
+                            case CommandSystem.CommandResult.Refresh:
+                                return (InputAction.RefreshDisplay, 0, false);
+                            default:
+                                continue;
+                        }
+                    }
+
+                    // ── 2. 终端模式：交给 TerminalMode 处理 ──
+                    if (LoadConfig.CurrentInputMode == InputMode.Terminal)
+                    {
+                        var termResult = TerminalMode.ProcessInput(input, out string? termStatus);
+                        // 将终端模式的状态信息通过返回值传递
+                        if (termResult == TerminalMode.ActionResult.SwitchToEdit)
+                            return (InputAction.EditConfig, 0, false);
+
+                        // 终端模式的结果通过划词区域的另一种方式...
+                        // 由于 WaitForInput 返回元组，终端模式的 status 无法直接传出，
+                        // 我们使用一个静态字段来传递状态信息
+                        _pendingTerminalStatus = termStatus;
+                        return (InputAction.RefreshDisplay, 0, false);
+                    }
+
+                    // ── 3. 正则匹配模式：原有逻辑 ──
                     bool admin = false;
                     if (input.Contains("-admin", StringComparison.OrdinalIgnoreCase))
                     {
