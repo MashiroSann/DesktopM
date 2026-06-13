@@ -86,6 +86,7 @@ public static class ConsoleUI
     private static readonly List<HitArea> _hitAreas = new();
     private static int _highlightedIdx = -1;
     private static int _promptRow;
+    private static int _promptOffset;  // prompt 字符串的显示宽度（用于光标定位）
     private static IntPtr _inputHandle;
     private static uint _originalMode;
     private static string? _pendingTerminalStatus;
@@ -101,6 +102,8 @@ public static class ConsoleUI
         CommandSystem.Register("togglemode", _ =>
         {
             LoadConfig.ToggleInputMode();
+            if (LoadConfig.CurrentInputMode == InputMode.Terminal)
+                TerminalMode.ResetToRoot();
             CommandSystem.LastResult = CommandSystem.CommandResult.Refresh;
         });
         CommandSystem.Register("edit", _ =>
@@ -361,10 +364,12 @@ public static class ConsoleUI
         row++;
         _promptRow = row;
         Console.SetCursorPosition(0, _promptRow);
-        Console.Write("> ");
+        string promptStr = "> ";
+        Console.Write(promptStr);
+        _promptOffset = GetDisplayWidth(promptStr);
     }
 
-    /// <summary>终端模式下的页面渲染：显示当前目录内容和命令行提示</summary>
+    /// <summary>终端模式下的页面渲染：显示配置目录树内容和命令行提示</summary>
     private static void RenderTerminalPage(string? statusMessage)
     {
         Console.Clear();
@@ -377,89 +382,103 @@ public static class ConsoleUI
 
         int row = 0;
 
-        // ── 标题：当前路径 ──
-        string pathLabel = $"📁 {TerminalMode.CurrentDirectory}";
+        // ── 标题：当前路径面包屑 ──
+        string pathLabel = $"📁 {TerminalMode.CurrentPath}";
         Console.SetCursorPosition(0, row++);
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.Write(pathLabel);
         Console.ResetColor();
 
         // ── 模式指示 ──
-        Console.SetCursorPosition(width - 20, 0);
+        Console.SetCursorPosition(Math.Max(0, width - 20), 0);
         Console.ForegroundColor = ConsoleColor.DarkGray;
         Console.Write("[终端模式]");
         Console.ResetColor();
 
-        // ── 分隔线 ──
+        // ── 大分隔线 ──
         Console.SetCursorPosition(0, row++);
-        Console.Write(new string('═', Math.Min(width - 1, pathLabel.Length + 4)));
+        Console.Write(new string('═', Math.Min(width - 1, 60)));
 
         row++; // blank line
 
-        // ── 目录内容 ──
-        var contents = TerminalMode.GetDirectoryContents();
-        if (contents.Count == 0)
+        // ── 配置项（与正则模式共享同一套数据）──
+        var items = LoadConfig.GetDisplayItems();
+        var folders = items.Where(i => i.IsFolder).ToList();
+        var nonFolders = items.Where(i => !i.IsFolder).ToList();
+
+        if (items.Count == 0)
         {
             Console.SetCursorPosition(2, row++);
             Console.ForegroundColor = ConsoleColor.DarkGray;
-            Console.Write("(空目录)");
+            Console.Write("(空)");
             Console.ResetColor();
         }
         else
         {
-            int maxNameLen = Math.Min(40, contents.Max(c => GetDisplayWidth(c.Name)) + 2);
-            int cols = Math.Max(1, (width - 2) / (maxNameLen + 2));
-            int currentCol = 0;
-
-            Console.SetCursorPosition(2, row);
-            for (int i = 0; i < contents.Count; i++)
+            // 文件夹
+            if (folders.Count > 0)
             {
-                var entry = contents[i];
-                string label = entry.IsDirectory
-                    ? $"📁 {entry.Name}"
-                    : $"   {entry.Name}";
-
-                // 截断过长名称
-                int maxDisplay = maxNameLen;
-                if (GetDisplayWidth(label) > maxDisplay)
+                int col = 0;
+                Console.SetCursorPosition(2, row);
+                for (int i = 0; i < folders.Count; i++)
                 {
-                    while (GetDisplayWidth(label + "…") > maxDisplay && label.Length > 1)
-                        label = label[..^1];
-                    label += "…";
+                    string label = $"[{folders[i].Index}] 📁 {folders[i].Name}";
+                    int labelWidth = GetDisplayWidth(label);
+                    _hitAreas.Add(new HitArea
+                    {
+                        Row = row, ColStart = col + 2, ColEnd = col + 2 + labelWidth,
+                        Label = label, ItemIndex = folders[i].Index,
+                        IsFolder = true, IsBack = false
+                    });
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.Write(label);
+                    Console.ResetColor();
+                    col += labelWidth;
+                    if (i < folders.Count - 1) { Console.Write("  "); col += 2; }
                 }
-
-                Console.ForegroundColor = entry.IsDirectory
-                    ? ConsoleColor.Cyan
-                    : ConsoleColor.White;
-                Console.Write(label);
-                Console.ResetColor();
-
-                currentCol++;
-                if (currentCol >= cols && i < contents.Count - 1)
-                {
-                    row++;
-                    currentCol = 0;
-                    Console.SetCursorPosition(2, row);
-                }
-                else if (i < contents.Count - 1)
-                {
-                    int pad = maxNameLen + 2 - GetDisplayWidth(label);
-                    Console.Write(new string(' ', Math.Max(1, pad)));
-                }
+                row++;
             }
-            row++;
+
+            // 短分隔线
+            if (folders.Count > 0 && nonFolders.Count > 0)
+            {
+                Console.SetCursorPosition(2, row++);
+                Console.Write(new string('─', Math.Min(24, width - 3)));
+            }
+
+            // 非文件夹项
+            if (nonFolders.Count > 0)
+            {
+                int col = 0;
+                Console.SetCursorPosition(2, row);
+                for (int i = 0; i < nonFolders.Count; i++)
+                {
+                    string label = $"[{nonFolders[i].Index}] {nonFolders[i].Name}";
+                    int labelWidth = GetDisplayWidth(label);
+                    _hitAreas.Add(new HitArea
+                    {
+                        Row = row, ColStart = col + 2, ColEnd = col + 2 + labelWidth,
+                        Label = label, ItemIndex = nonFolders[i].Index,
+                        IsFolder = false, IsBack = false
+                    });
+                    Console.Write(label);
+                    col += labelWidth;
+                    if (i < nonFolders.Count - 1) { Console.Write("  "); col += 2; }
+                }
+                row++;
+            }
         }
 
         row++; // blank line
 
-        // ── 分隔线 ──
+        // ── 短分隔线 ──
         Console.SetCursorPosition(0, row++);
         Console.Write(new string('─', Math.Min(24, width - 1)));
 
         // ── 帮助提示 ──
         Console.SetCursorPosition(0, row++);
         Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.Write("cd <目录> | cd .. | ls | ./程序名 [-admin] | cc | /togglemode | /edit");
+        Console.Write("cd <名称> | cd .. | ls | ./程序名 [-admin] | cc | /togglemode | /edit");
         Console.ResetColor();
 
         // ── [E] Edit Config ──
@@ -486,20 +505,21 @@ public static class ConsoleUI
             bool isError = statusMessage.Contains("not found", StringComparison.OrdinalIgnoreCase)
                         || statusMessage.StartsWith("Failed", StringComparison.OrdinalIgnoreCase)
                         || statusMessage.StartsWith("未识别", StringComparison.OrdinalIgnoreCase)
-                        || statusMessage.StartsWith("目录不存在", StringComparison.OrdinalIgnoreCase);
+                        || statusMessage.StartsWith("文件夹不存在", StringComparison.OrdinalIgnoreCase)
+                        || statusMessage.StartsWith("启动失败", StringComparison.OrdinalIgnoreCase)
+                        || statusMessage.StartsWith("UAC", StringComparison.OrdinalIgnoreCase);
             Console.ForegroundColor = isError ? ConsoleColor.Red : ConsoleColor.Green;
             Console.Write(statusMessage);
             Console.ResetColor();
         }
 
-        // ── 输入提示 ──
+        // ── 输入提示（使用面包屑路径）──
         row++;
         _promptRow = row;
         Console.SetCursorPosition(0, _promptRow);
-        string shortPath = TerminalMode.CurrentDirectory;
-        if (shortPath.Length > 50)
-            shortPath = "…" + shortPath[^49..];
-        Console.Write($"{shortPath}> ");
+        string promptStr = $"{TerminalMode.CurrentPath}> ";
+        Console.Write(promptStr);
+        _promptOffset = GetDisplayWidth(promptStr);
     }
 
     private static (InputAction action, int index, bool admin) WaitForInput()
@@ -639,9 +659,9 @@ public static class ConsoleUI
                         inputBuf.Remove(inputBuf.Length - 1, 1);
                         int displayPos = GetDisplayWidth(inputBuf.ToString());
                         int charWidth = IsFullWidth(removed) ? 2 : 1;
-                        Console.SetCursorPosition(2 + displayPos, _promptRow);
+                        Console.SetCursorPosition(_promptOffset + displayPos, _promptRow);
                         Console.Write(new string(' ', charWidth));
-                        Console.SetCursorPosition(2 + displayPos, _promptRow);
+                        Console.SetCursorPosition(_promptOffset + displayPos, _promptRow);
                     }
                 }
                 else if (vk == 0x1B) // Escape
@@ -652,7 +672,7 @@ public static class ConsoleUI
                 {
                     int curDisplayWidth = GetDisplayWidth(inputBuf.ToString());
                     inputBuf.Append(c);
-                    Console.SetCursorPosition(2 + curDisplayWidth, _promptRow);
+                    Console.SetCursorPosition(_promptOffset + curDisplayWidth, _promptRow);
                     Console.Write(c);
                 }
             }
@@ -695,6 +715,6 @@ public static class ConsoleUI
         }
 
         _highlightedIdx = newIdx;
-        Console.SetCursorPosition(2 + inputLen, _promptRow);
+        Console.SetCursorPosition(_promptOffset + inputLen, _promptRow);
     }
 }

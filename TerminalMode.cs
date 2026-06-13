@@ -1,21 +1,38 @@
-using System.Diagnostics;
-
 /// <summary>
-/// 仿 Linux/Unix 命令行输入模式。
+/// 仿 Linux/Unix 命令行输入模式，以配置文件目录树为数据源。
 /// 支持指令：cd、ls、cc、./程序名，以及 -admin 启动参数。
+/// 与正则匹配模式共享同一套配置目录结构。
 /// </summary>
 public static class TerminalMode
 {
-    /// <summary>当前工作目录</summary>
-    public static string CurrentDirectory { get; private set; } =
-        Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+    /// <summary>当前导航路径的面包屑显示（如 "~ / 工作 / 工具"）</summary>
+    public static string CurrentPath
+    {
+        get
+        {
+            if (_pathStack.Count == 0)
+                return "~";
+            return "~ / " + string.Join(" / ", _pathStack);
+        }
+    }
+
+    private static readonly List<string> _pathStack = new();
 
     /// <summary>处理终端输入后的结果类型</summary>
     public enum ActionResult
     {
         None,           // 无操作
-        Refresh,        // 需要刷新显示（目录切换、ls 等）
+        Refresh,        // 需要刷新显示
         SwitchToEdit    // 切换到配置编辑器
+    }
+
+    /// <summary>切换到终端模式时调用，确保从根层级开始</summary>
+    public static void ResetToRoot()
+    {
+        _pathStack.Clear();
+        // 确保回到配置树的根层级
+        while (LoadConfig.CurrentLayer > 1)
+            LoadConfig.GoBack();
     }
 
     /// <summary>
@@ -36,7 +53,6 @@ public static class TerminalMode
         if (processed.Contains("-admin", StringComparison.OrdinalIgnoreCase))
         {
             admin = true;
-            // 去掉 -admin 标志，保留其余部分
             processed = processed.Replace("-admin", "", StringComparison.OrdinalIgnoreCase).Trim();
         }
 
@@ -47,65 +63,73 @@ public static class TerminalMode
             return ActionResult.Refresh;
         }
 
-        // ── ls —— 列出当前目录 ──
+        // ── ls —— 列出当前目录（配置项），Refresh 触发重新渲染 ──
         if (processed.Equals("ls", StringComparison.OrdinalIgnoreCase))
         {
             return ActionResult.Refresh;
         }
 
-        // ── cd .. —— 返回上级目录 ──
+        // ── cd .. —— 返回上级配置层级 ──
         if (processed.Equals("cd ..", StringComparison.OrdinalIgnoreCase) ||
             processed.Equals("cd..", StringComparison.OrdinalIgnoreCase))
         {
-            var parent = Directory.GetParent(CurrentDirectory);
-            if (parent != null)
+            if (LoadConfig.CurrentLayer > 1)
             {
-                CurrentDirectory = parent.FullName;
+                LoadConfig.GoBack();
+                if (_pathStack.Count > 0)
+                    _pathStack.RemoveAt(_pathStack.Count - 1);
                 return ActionResult.Refresh;
             }
-            statusMessage = "已在根目录。";
+            statusMessage = "已在根层级。";
             return ActionResult.Refresh;
         }
 
-        // ── cd <path> —— 进入指定目录 ──
+        // ── cd <名称> —— 进入指定配置文件夹 ──
         if (processed.StartsWith("cd ", StringComparison.OrdinalIgnoreCase))
         {
-            string pathArg = processed[3..].Trim();
+            string folderName = processed[3..].Trim();
 
             // 去掉可能的引号
-            if (pathArg.Length >= 2 && pathArg.StartsWith('"') && pathArg.EndsWith('"'))
-                pathArg = pathArg[1..^1];
+            if (folderName.Length >= 2 && folderName.StartsWith('"') && folderName.EndsWith('"'))
+                folderName = folderName[1..^1];
 
-            string newPath;
-            if (Path.IsPathRooted(pathArg))
-                newPath = pathArg;
-            else
-                newPath = Path.GetFullPath(Path.Combine(CurrentDirectory, pathArg));
+            var items = LoadConfig.GetDisplayItems();
+            // 按名称查找文件夹（忽略大小写）
+            var match = items.FirstOrDefault(i =>
+                i.IsFolder && i.Name.Equals(folderName, StringComparison.OrdinalIgnoreCase));
 
-            if (Directory.Exists(newPath))
+            if (match.Name != null)
             {
-                CurrentDirectory = newPath;
+                LoadConfig.NavigateInto(match.Index);
+                _pathStack.Add(match.Name);
                 return ActionResult.Refresh;
             }
 
-            statusMessage = $"目录不存在: {pathArg}";
+            statusMessage = $"文件夹不存在: {folderName}";
             return ActionResult.Refresh;
         }
 
-        // ── ./程序名 或 .\程序名 —— 启动当前目录下的程序 ──
+        // ── ./程序名 或 .\程序名 —— 启动当前层级下的配置项 ──
         string programName = processed;
         if (processed.StartsWith("./") || processed.StartsWith(".\\"))
             programName = processed[2..];
 
-        string? fullPath = ResolveProgram(programName);
+        var allItems = LoadConfig.GetDisplayItems();
+        var found = allItems.FirstOrDefault(i =>
+            !i.IsFolder && i.Name.Equals(programName, StringComparison.OrdinalIgnoreCase));
 
-        if (fullPath != null)
+        if (found.Name != null)
         {
-            LaunchProgram(fullPath, admin);
-            string name = Path.GetFileName(fullPath);
-            statusMessage = admin
-                ? $"已启动: {name}（管理员权限）"
-                : $"已启动: {name}";
+            var (result, name) = LoadConfig.LaunchItem(found.Index, admin);
+            statusMessage = result switch
+            {
+                LoadConfig.LaunchResult.Success => admin
+                    ? $"已启动: {name}（管理员权限）"
+                    : $"已启动: {name}",
+                LoadConfig.LaunchResult.NotFound => $"路径未找到: {name}",
+                LoadConfig.LaunchResult.UacDenied => $"UAC 授权被拒绝: {name}",
+                _ => $"启动失败: {name}"
+            };
             return ActionResult.Refresh;
         }
 
@@ -113,124 +137,5 @@ public static class TerminalMode
         statusMessage = $"未识别的命令: {processed}";
         return ActionResult.Refresh;
     }
-
-    /// <summary>获取当前目录下的所有文件和文件夹（用于显示）</summary>
-    public static List<DirectoryEntry> GetDirectoryContents()
-    {
-        var result = new List<DirectoryEntry>();
-
-        try
-        {
-            foreach (var dir in Directory.GetDirectories(CurrentDirectory))
-            {
-                result.Add(new DirectoryEntry
-                {
-                    Name = Path.GetFileName(dir),
-                    IsDirectory = true
-                });
-            }
-
-            foreach (var file in Directory.GetFiles(CurrentDirectory))
-            {
-                result.Add(new DirectoryEntry
-                {
-                    Name = Path.GetFileName(file),
-                    IsDirectory = false
-                });
-            }
-        }
-        catch (UnauthorizedAccessException) { }
-        catch (Exception) { }
-
-        // 排序：文件夹在前，然后文件，均按名称不区分大小写
-        result.Sort((a, b) =>
-        {
-            if (a.IsDirectory != b.IsDirectory)
-                return a.IsDirectory ? -1 : 1;
-            return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
-        });
-
-        return result;
-    }
-
-    public struct DirectoryEntry
-    {
-        public string Name;
-        public bool IsDirectory;
-    }
-
-    #region Helpers
-
-    /// <summary>解析程序路径：尝试在当前目录下匹配程序名</summary>
-    private static string? ResolveProgram(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-            return null;
-
-        // 已经是完整路径
-        if (Path.IsPathRooted(name))
-        {
-            if (File.Exists(name))
-                return name;
-            return null;
-        }
-
-        string fullPath = Path.GetFullPath(Path.Combine(CurrentDirectory, name));
-
-        // 精确匹配
-        if (File.Exists(fullPath))
-            return fullPath;
-
-        // 尝试追加常见扩展名
-        string[] extensions = { ".exe", ".lnk", ".bat", ".cmd", ".com", ".msc" };
-        foreach (string ext in extensions)
-        {
-            string withExt = fullPath + ext;
-            if (File.Exists(withExt))
-                return withExt;
-        }
-
-        return null;
-    }
-
-    /// <summary>启动程序（通过 cmd /c start 完全分离子进程）</summary>
-    private static void LaunchProgram(string fullPath, bool asAdmin)
-    {
-        try
-        {
-            ProcessStartInfo psi;
-            if (asAdmin)
-            {
-                psi = new ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = $"/c start \"\" \"{fullPath}\"",
-                    UseShellExecute = true,
-                    Verb = "runas",
-                    WindowStyle = ProcessWindowStyle.Hidden
-                };
-            }
-            else
-            {
-                psi = new ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = $"/c start \"\" \"{fullPath}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-            }
-            Process.Start(psi);
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-            // UAC denied — silently ignored
-        }
-        catch (Exception)
-        {
-            // Other errors — silently ignored
-        }
-    }
-
-    #endregion
 }
+
